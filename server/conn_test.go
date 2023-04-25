@@ -1,8 +1,8 @@
 package server
 
 import (
-	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/pingcap/check"
+	"github.com/starainrt/go-mysql/mysql"
 )
 
 type connTestSuite struct {

@@ -6,9 +6,9 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	. "github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/go-mysql-org/go-mysql/packet"
 	"github.com/pingcap/errors"
+	. "github.com/starainrt/go-mysql/mysql"
+	"github.com/starainrt/go-mysql/packet"
 )
 
 const defaultAuthPluginName = AUTH_NATIVE_PASSWORD

@@ -3,10 +3,9 @@ package replication
 import (
 	"fmt"
 
-	. "github.com/pingcap/check"
 	"github.com/shopspring/decimal"
 
-	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/starainrt/go-mysql/mysql"
 )
 
 type testDecodeSuite struct{}

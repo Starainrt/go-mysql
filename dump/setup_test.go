@@ -4,8 +4,7 @@ import (
 	"flag"
 	"testing"
 
-	"github.com/go-mysql-org/go-mysql/mysql"
-	. "github.com/pingcap/check"
+	"github.com/starainrt/go-mysql/mysql"
 )
 
 var execution = flag.String("exec", "mysqldump", "mysqldump execution path")

@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/go-mysql-org/go-mysql/schema"
 	"github.com/pingcap/errors"
 	"github.com/shopspring/decimal"
+	"github.com/starainrt/go-mysql/mysql"
+	"github.com/starainrt/go-mysql/schema"
 )
 
 type dumpParseHandler struct {

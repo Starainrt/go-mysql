@@ -5,9 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	. "github.com/pingcap/check"
-
-	"github.com/go-mysql-org/go-mysql/test_util"
+	"github.com/starainrt/go-mysql/test_util"
 )
 
 var testUser = flag.String("user", "root", "MySQL user")

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/starainrt/go-mysql/mysql"
 )
 
 func TestConnGenAttributes(t *testing.T) {

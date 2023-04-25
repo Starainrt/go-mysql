@@ -12,9 +12,9 @@ import (
 	"net"
 	"sync"
 
-	. "github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/go-mysql-org/go-mysql/utils"
 	"github.com/pingcap/errors"
+	. "github.com/starainrt/go-mysql/mysql"
+	"github.com/starainrt/go-mysql/utils"
 )
 
 type BufPool struct {

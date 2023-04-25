@@ -5,14 +5,13 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/parser"
 	"github.com/siddontang/go-log/log"
 
-	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/go-mysql-org/go-mysql/replication"
-	"github.com/go-mysql-org/go-mysql/test_util"
+	"github.com/starainrt/go-mysql/mysql"
+	"github.com/starainrt/go-mysql/replication"
+	"github.com/starainrt/go-mysql/test_util"
 )
 
 func Test(t *testing.T) {

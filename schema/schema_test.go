@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"testing"
 
-	. "github.com/pingcap/check"
-
-	"github.com/go-mysql-org/go-mysql/client"
-	_ "github.com/go-mysql-org/go-mysql/driver"
-	"github.com/go-mysql-org/go-mysql/test_util"
+	"github.com/starainrt/go-mysql/client"
+	_ "github.com/starainrt/go-mysql/driver"
+	"github.com/starainrt/go-mysql/test_util"
 )
 
 var schema = flag.String("schema", "test", "MySQL Database")

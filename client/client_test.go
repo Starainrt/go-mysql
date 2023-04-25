@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"strings"
 
-	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 
-	"github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/go-mysql-org/go-mysql/test_util"
-	"github.com/go-mysql-org/go-mysql/test_util/test_keys"
+	"github.com/starainrt/go-mysql/mysql"
+	"github.com/starainrt/go-mysql/test_util"
+	"github.com/starainrt/go-mysql/test_util/test_keys"
 )
 
 type clientTestSuite struct {

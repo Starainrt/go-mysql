@@ -3,8 +3,7 @@ package dump
 import (
 	"strings"
 
-	"github.com/go-mysql-org/go-mysql/mysql"
-	. "github.com/pingcap/check"
+	"github.com/starainrt/go-mysql/mysql"
 )
 
 type parserTestSuite struct {
