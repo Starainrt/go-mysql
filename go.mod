@@ -1,4 +1,4 @@
-module github.com/go-mysql-org/go-mysql
+module github.com/starainrt/go-mysql
 
 go 1.16
 
@@ -15,7 +15,7 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/shopspring/decimal v0.0.0-20180709203117-cd690d0c9e24
 	github.com/siddontang/go v0.0.0-20180604090527-bdc77568d726
-	github.com/siddontang/go-log v0.0.0-20180807004314-8d05993dda07
+	github.com/siddontang/go-log v0.0.0-20190221022429-1e957dd83bed
 	github.com/stretchr/testify v1.8.0
 	golang.org/x/tools v0.0.0-20201125231158-b5590deeca9b // indirect
 )
