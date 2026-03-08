@@ -7,13 +7,17 @@ import (
 	"github.com/starainrt/go-mysql/replication"
 )
 
-var name = flag.String("name", "", "binlog file name")
-var offset = flag.Int64("offset", 0, "parse start offset")
+var (
+	name   = flag.String("name", "", "binlog file name")
+	offset = flag.Int64("offset", 0, "parse start offset")
+	verify = flag.Bool("verify", false, "verify checksum")
+)
 
 func main() {
 	flag.Parse()
 
 	p := replication.NewBinlogParser()
+	p.SetVerifyChecksum(*verify)
 
 	f := func(e *replication.BinlogEvent) error {
 		e.Dump(os.Stdout)
@@ -21,8 +25,8 @@ func main() {
 	}
 
 	err := p.ParseFile(*name, *offset, f)
-
 	if err != nil {
 		println(err.Error())
+		os.Exit(1)
 	}
 }

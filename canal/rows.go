@@ -23,12 +23,12 @@ type RowsEvent struct {
 	// for v1 and v2, the rows number must be even.
 	// Two rows for one event, format is [before update row, after update row]
 	// for update v0, only one row for a event, and we don't support this version.
-	Rows [][]interface{}
+	Rows [][]any
 	// Header can be used to inspect the event
 	Header *replication.EventHeader
 }
 
-func newRowsEvent(table *schema.Table, action string, rows [][]interface{}, header *replication.EventHeader) *RowsEvent {
+func newRowsEvent(table *schema.Table, action string, rows [][]any, header *replication.EventHeader) *RowsEvent {
 	e := new(RowsEvent)
 
 	e.Table = table
@@ -53,6 +53,13 @@ func (r *RowsEvent) handleUnsigned() {
 
 	for i := 0; i < len(r.Rows); i++ {
 		for _, columnIdx := range r.Table.UnsignedColumns {
+			// When Canal.delay is big, after call Canal.StartFromGTID(),
+			// we will get the newest table schema (for example, after DDL "alter table add column xxx unsigned..."),
+			// but the binlog data can be very old (before DDL "alter table add column xxx unsigned..."),
+			// results in max(columnIdx) >= len(r.Rows[i]), then r.Rows[i][columnIdx] panic.
+			if columnIdx >= len(r.Rows[i]) {
+				continue
+			}
 			switch value := r.Rows[i][columnIdx].(type) {
 			case int8:
 				r.Rows[i][columnIdx] = uint8(value)

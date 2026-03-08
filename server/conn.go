@@ -3,11 +3,10 @@ package server
 import (
 	"errors"
 	"net"
+	"sync"
 	"sync/atomic"
 
-	"github.com/siddontang/go/sync2"
-
-	. "github.com/starainrt/go-mysql/mysql"
+	"github.com/starainrt/go-mysql/mysql"
 	"github.com/starainrt/go-mysql/packet"
 )
 
@@ -25,9 +24,9 @@ type Conn struct {
 	warnings       uint16
 	salt           []byte // should be 8 + 12 for auth-plugin-data-part-1 and auth-plugin-data-part-2
 
-	credentialProvider  CredentialProvider
+	authHandler         AuthenticationHandler
 	user                string
-	password            string
+	credential          Credential
 	cachingSha2FullAuth bool
 
 	h Handler
@@ -35,61 +34,58 @@ type Conn struct {
 	stmts  map[uint32]*Stmt
 	stmtID uint32
 
-	closed sync2.AtomicBool
+	closed atomic.Bool
 }
 
-var baseConnID uint32 = 10000
+var (
+	baseConnID    uint32 = 10000
+	defaultServer        = sync.OnceValue(func() *Server {
+		return NewDefaultServer()
+	})
+)
 
 // NewConn: create connection with default server settings
+//
+// Deprecated: Use [Server.NewConn] instead.
 func NewConn(conn net.Conn, user string, password string, h Handler) (*Conn, error) {
-	p := NewInMemoryProvider()
-	p.AddUser(user, password)
-
-	var packetConn *packet.Conn
-	if defaultServer.tlsConfig != nil {
-		packetConn = packet.NewTLSConn(conn)
-	} else {
-		packetConn = packet.NewConn(conn)
-	}
-
-	c := &Conn{
-		Conn:               packetConn,
-		serverConf:         defaultServer,
-		credentialProvider: p,
-		h:                  h,
-		connectionID:       atomic.AddUint32(&baseConnID, 1),
-		stmts:              make(map[uint32]*Stmt),
-		salt:               RandomBuf(20),
-	}
-	c.closed.Set(false)
-
-	if err := c.handshake(); err != nil {
-		c.Close()
-		return nil, err
-	}
-
-	return c, nil
+	return defaultServer().NewConn(conn, user, password, h)
 }
 
 // NewCustomizedConn: create connection with customized server settings
-func NewCustomizedConn(conn net.Conn, serverConf *Server, p CredentialProvider, h Handler) (*Conn, error) {
+//
+// Deprecated: Use [Server.NewCustomizedConn] instead.
+func NewCustomizedConn(conn net.Conn, serverConf *Server, authHandler AuthenticationHandler, h Handler) (*Conn, error) {
+	return serverConf.NewCustomizedConn(conn, authHandler, h)
+}
+
+// NewConn: create connection with default server settings
+func (s *Server) NewConn(conn net.Conn, user string, password string, h Handler) (*Conn, error) {
+	authHandler := NewInMemoryAuthenticationHandler()
+	if err := authHandler.AddUser(user, password); err != nil {
+		return nil, err
+	}
+
+	return s.NewCustomizedConn(conn, authHandler, h)
+}
+
+func (s *Server) NewCustomizedConn(conn net.Conn, authHandler AuthenticationHandler, h Handler) (*Conn, error) {
 	var packetConn *packet.Conn
-	if serverConf.tlsConfig != nil {
+	if s.tlsConfig != nil {
 		packetConn = packet.NewTLSConn(conn)
 	} else {
 		packetConn = packet.NewConn(conn)
 	}
 
 	c := &Conn{
-		Conn:               packetConn,
-		serverConf:         serverConf,
-		credentialProvider: p,
-		h:                  h,
-		connectionID:       atomic.AddUint32(&baseConnID, 1),
-		stmts:              make(map[uint32]*Stmt),
-		salt:               RandomBuf(20),
+		Conn:         packetConn,
+		serverConf:   s,
+		authHandler:  authHandler,
+		h:            h,
+		connectionID: atomic.AddUint32(&baseConnID, 1),
+		stmts:        make(map[uint32]*Stmt),
+		salt:         mysql.RandomBuf(20),
 	}
-	c.closed.Set(false)
+	c.closed.Store(false)
 
 	if err := c.handshake(); err != nil {
 		c.Close()
@@ -106,12 +102,19 @@ func (c *Conn) handshake() error {
 
 	if err := c.readHandshakeResponse(); err != nil {
 		if errors.Is(err, ErrAccessDenied) {
-			var usingPasswd uint16 = ER_YES
+			var usingPasswd uint16 = mysql.ER_YES
 			if errors.Is(err, ErrAccessDeniedNoPassword) {
-				usingPasswd = ER_NO
+				usingPasswd = mysql.ER_NO
 			}
-			err = NewDefaultError(ER_ACCESS_DENIED_ERROR, c.user, c.RemoteAddr().String(), MySQLErrName[usingPasswd])
+			err = mysql.NewDefaultError(mysql.ER_ACCESS_DENIED_ERROR, c.user,
+				c.RemoteAddr().String(), mysql.MySQLErrName[usingPasswd])
 		}
+		c.authHandler.OnAuthFailure(c, err)
+		_ = c.writeError(err)
+		return err
+	}
+
+	if err := c.authHandler.OnAuthSuccess(c); err != nil {
 		_ = c.writeError(err)
 		return err
 	}
@@ -126,12 +129,12 @@ func (c *Conn) handshake() error {
 }
 
 func (c *Conn) Close() {
-	c.closed.Set(true)
+	c.closed.Store(true)
 	c.Conn.Close()
 }
 
 func (c *Conn) Closed() bool {
-	return c.closed.Get()
+	return c.closed.Load()
 }
 
 func (c *Conn) GetUser() string {
@@ -158,6 +161,8 @@ func (c *Conn) Charset() uint8 {
 	return c.charset
 }
 
+// Attributes returns the connection attributes.
+// Note that this is only sent to the server if CLIENT_CONNECT_ATTRS is set.
 func (c *Conn) Attributes() map[string]string {
 	return c.attributes
 }
@@ -167,19 +172,19 @@ func (c *Conn) ConnectionID() uint32 {
 }
 
 func (c *Conn) IsAutoCommit() bool {
-	return c.HasStatus(SERVER_STATUS_AUTOCOMMIT)
+	return c.HasStatus(mysql.SERVER_STATUS_AUTOCOMMIT)
 }
 
 func (c *Conn) IsInTransaction() bool {
-	return c.HasStatus(SERVER_STATUS_IN_TRANS)
+	return c.HasStatus(mysql.SERVER_STATUS_IN_TRANS)
 }
 
 func (c *Conn) SetInTransaction() {
-	c.SetStatus(SERVER_STATUS_IN_TRANS)
+	c.SetStatus(mysql.SERVER_STATUS_IN_TRANS)
 }
 
 func (c *Conn) ClearInTransaction() {
-	c.UnsetStatus(SERVER_STATUS_IN_TRANS)
+	c.UnsetStatus(mysql.SERVER_STATUS_IN_TRANS)
 }
 
 func (c *Conn) SetStatus(status uint16) {

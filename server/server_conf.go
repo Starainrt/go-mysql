@@ -1,14 +1,13 @@
 package server
 
 import (
+	"crypto/rsa"
 	"crypto/tls"
 	"fmt"
 	"sync"
 
-	. "github.com/starainrt/go-mysql/mysql"
+	"github.com/starainrt/go-mysql/mysql"
 )
-
-var defaultServer = NewDefaultServer()
 
 // Defines a basic MySQL server with configs.
 //
@@ -31,9 +30,11 @@ type Server struct {
 	capability        uint32 // server capability flag
 	collationId       uint8
 	defaultAuthMethod string // default authentication method, 'mysql_native_password'
-	pubKey            []byte
+	rsaPrivateKey     *rsa.PrivateKey
+	rsaPublicKeyBytes []byte
 	tlsConfig         *tls.Config
 	cacheShaPassword  *sync.Map // 'user@host' -> SHA256(SHA256(PASSWORD))
+	authProvider      AuthenticationProvider
 }
 
 // NewDefaultServer: New mysql server with default settings.
@@ -47,16 +48,20 @@ func NewDefaultServer() *Server {
 	caPem, caKey := generateCA()
 	certPem, keyPem := generateAndSignRSACerts(caPem, caKey)
 	tlsConf := NewServerTLSConfig(caPem, certPem, keyPem, tls.VerifyClientCertIfGiven)
+	rsaPrivateKey, rsaPublicKeyBytes := getRSAKeyPairFromPEM(keyPem)
 	return &Server{
-		serverVersion:   "5.7.0",
+		serverVersion:   "8.0.11",
 		protocolVersion: 10,
-		capability: CLIENT_LONG_PASSWORD | CLIENT_LONG_FLAG | CLIENT_CONNECT_WITH_DB | CLIENT_PROTOCOL_41 |
-			CLIENT_TRANSACTIONS | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH | CLIENT_SSL | CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA,
-		collationId:       DEFAULT_COLLATION_ID,
-		defaultAuthMethod: AUTH_NATIVE_PASSWORD,
-		pubKey:            getPublicKeyFromCert(certPem),
+		capability: mysql.CLIENT_LONG_PASSWORD | mysql.CLIENT_LONG_FLAG | mysql.CLIENT_CONNECT_WITH_DB | mysql.CLIENT_PROTOCOL_41 |
+			mysql.CLIENT_TRANSACTIONS | mysql.CLIENT_SECURE_CONNECTION | mysql.CLIENT_PLUGIN_AUTH | mysql.CLIENT_SSL |
+			mysql.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA | mysql.CLIENT_CONNECT_ATTRS,
+		collationId:       mysql.DEFAULT_COLLATION_ID,
+		defaultAuthMethod: mysql.AUTH_NATIVE_PASSWORD,
+		rsaPrivateKey:     rsaPrivateKey,
+		rsaPublicKeyBytes: rsaPublicKeyBytes,
 		tlsConfig:         tlsConf,
 		cacheShaPassword:  new(sync.Map),
+		authProvider:      &DefaultAuthenticationProvider{},
 	}
 }
 
@@ -64,24 +69,40 @@ func NewDefaultServer() *Server {
 //
 // NOTES:
 // You can control the authentication methods and TLS settings here.
+//
 // For auth method, you can specify one of the supported methods 'mysql_native_password', 'caching_sha2_password', and 'sha256_password'.
 // The specified auth method will be enforced by the server in the connection phase. That means, client will be asked to switch auth method
 // if the supplied auth method is different from the server default.
-// And for TLS support, you can specify self-signed or CA-signed certificates and decide whether the client needs to provide
+//
+// For TLS support, you can specify self-signed or CA-signed certificates and decide whether the client needs to provide
 // a signed or unsigned certificate to provide different level of security.
-func NewServer(serverVersion string, collationId uint8, defaultAuthMethod string, pubKey []byte, tlsConfig *tls.Config) *Server {
-	if !isAuthMethodSupported(defaultAuthMethod) {
+//
+// The rsaKey parameter is used for password encryption on non-TLS connections with 'caching_sha2_password' and 'sha256_password'.
+// If it's is nil, it will attempt to extract an RSA key from tlsConfig.Certificates[0].
+// If no RSA key is available, non-TLS connections will not be supported for these auth methods (TLS connections will still work).
+func NewServer(serverVersion string, collationId uint8, defaultAuthMethod string, rsaKey *rsa.PrivateKey, tlsConfig *tls.Config) *Server {
+	authProvider := &DefaultAuthenticationProvider{}
+	return NewServerWithAuth(serverVersion, collationId, defaultAuthMethod, rsaKey, tlsConfig, authProvider)
+}
+
+func NewServerWithAuth(serverVersion string, collationId uint8, defaultAuthMethod string, rsaKey *rsa.PrivateKey, tlsConfig *tls.Config, authProvider AuthenticationProvider) *Server {
+	if authProvider == nil || !authProvider.Validate(defaultAuthMethod) {
 		panic(fmt.Sprintf("server authentication method '%s' is not supported", defaultAuthMethod))
 	}
 
-	//if !isAuthMethodAllowedByServer(defaultAuthMethod, allowedAuthMethods) {
-	//	panic(fmt.Sprintf("default auth method is not one of the allowed auth methods"))
-	//}
-	var capFlag = CLIENT_LONG_PASSWORD | CLIENT_LONG_FLAG | CLIENT_CONNECT_WITH_DB | CLIENT_PROTOCOL_41 |
-		CLIENT_TRANSACTIONS | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH | CLIENT_CONNECT_ATTRS |
-		CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+	if rsaKey == nil && (defaultAuthMethod == mysql.AUTH_CACHING_SHA2_PASSWORD || defaultAuthMethod == mysql.AUTH_SHA256_PASSWORD) {
+		if tlsConfig != nil && len(tlsConfig.Certificates) > 0 {
+			rsaKey, _ = tlsConfig.Certificates[0].PrivateKey.(*rsa.PrivateKey)
+		} else {
+			panic("either rsaKey or tlsConfig is required for caching_sha2_password and sha256_password authentication")
+		}
+	}
+
+	capFlag := mysql.CLIENT_LONG_PASSWORD | mysql.CLIENT_LONG_FLAG | mysql.CLIENT_CONNECT_WITH_DB | mysql.CLIENT_PROTOCOL_41 |
+		mysql.CLIENT_TRANSACTIONS | mysql.CLIENT_SECURE_CONNECTION | mysql.CLIENT_PLUGIN_AUTH | mysql.CLIENT_CONNECT_ATTRS |
+		mysql.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
 	if tlsConfig != nil {
-		capFlag |= CLIENT_SSL
+		capFlag |= mysql.CLIENT_SSL
 	}
 	return &Server{
 		serverVersion:     serverVersion,
@@ -89,14 +110,16 @@ func NewServer(serverVersion string, collationId uint8, defaultAuthMethod string
 		capability:        capFlag,
 		collationId:       collationId,
 		defaultAuthMethod: defaultAuthMethod,
-		pubKey:            pubKey,
+		rsaPrivateKey:     rsaKey,
+		rsaPublicKeyBytes: rsaPublicKeyBytes(rsaKey),
 		tlsConfig:         tlsConfig,
 		cacheShaPassword:  new(sync.Map),
+		authProvider:      authProvider,
 	}
 }
 
 func isAuthMethodSupported(authMethod string) bool {
-	return authMethod == AUTH_NATIVE_PASSWORD || authMethod == AUTH_CACHING_SHA2_PASSWORD || authMethod == AUTH_SHA256_PASSWORD
+	return authMethod == mysql.AUTH_NATIVE_PASSWORD || authMethod == mysql.AUTH_CACHING_SHA2_PASSWORD || authMethod == mysql.AUTH_SHA256_PASSWORD || authMethod == mysql.AUTH_CLEAR_PASSWORD
 }
 
 func (s *Server) InvalidateCache(username string, host string) {

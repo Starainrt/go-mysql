@@ -6,112 +6,109 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
-	"github.com/siddontang/go-log/log"
+	_ "github.com/starainrt/go-mysql/driver"
+	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 
 	"github.com/starainrt/go-mysql/mysql"
 	"github.com/starainrt/go-mysql/test_util"
 	"github.com/starainrt/go-mysql/test_util/test_keys"
 )
 
-var delay = 50
-
 // test caching for 'caching_sha2_password'
 // NOTE the idea here is to plugin a throttled credential provider so that the first connection (cache miss) will take longer time
 // than the second connection (cache hit). Remember to set the password for MySQL user otherwise it won't cache empty password.
 func TestCachingSha2Cache(t *testing.T) {
-	log.SetLevel(log.LevelDebug)
-
-	remoteProvider := &RemoteThrottleProvider{NewInMemoryProvider(), delay + 50}
-	remoteProvider.AddUser(*testUser, *testPassword)
-	cacheServer := NewServer("8.0.12", mysql.DEFAULT_COLLATION_ID, mysql.AUTH_CACHING_SHA2_PASSWORD, test_keys.PubPem, tlsConf)
+	remoteProvider := &RemoteThrottleProvider{
+		InMemoryAuthenticationHandler: NewInMemoryAuthenticationHandler(),
+	}
+	require.NoError(t, remoteProvider.AddUser(*testUser, *testPassword))
+	cacheServer := NewServer("8.0.12", mysql.DEFAULT_COLLATION_ID, mysql.AUTH_CACHING_SHA2_PASSWORD, test_keys.RSAKey(), tlsConf)
 
 	// no TLS
-	Suite(&cacheTestSuite{
-		server:       cacheServer,
-		credProvider: remoteProvider,
-		tlsPara:      "false",
+	suite.Run(t, &cacheTestSuite{
+		server:      cacheServer,
+		authHandler: remoteProvider,
+		tlsPara:     "false",
 	})
-
-	TestingT(t)
 }
 
 func TestCachingSha2CacheTLS(t *testing.T) {
-	log.SetLevel(log.LevelDebug)
-
-	remoteProvider := &RemoteThrottleProvider{NewInMemoryProvider(), delay + 50}
-	remoteProvider.AddUser(*testUser, *testPassword)
-	cacheServer := NewServer("8.0.12", mysql.DEFAULT_COLLATION_ID, mysql.AUTH_CACHING_SHA2_PASSWORD, test_keys.PubPem, tlsConf)
+	remoteProvider := &RemoteThrottleProvider{
+		InMemoryAuthenticationHandler: NewInMemoryAuthenticationHandler(),
+	}
+	require.NoError(t, remoteProvider.AddUser(*testUser, *testPassword))
+	cacheServer := NewServer("8.0.12", mysql.DEFAULT_COLLATION_ID, mysql.AUTH_CACHING_SHA2_PASSWORD, test_keys.RSAKey(), tlsConf)
 
 	// TLS
-	Suite(&cacheTestSuite{
-		server:       cacheServer,
-		credProvider: remoteProvider,
-		tlsPara:      "skip-verify",
+	suite.Run(t, &cacheTestSuite{
+		server:      cacheServer,
+		authHandler: remoteProvider,
+		tlsPara:     "skip-verify",
 	})
-
-	TestingT(t)
 }
 
 type RemoteThrottleProvider struct {
-	*InMemoryProvider
-	delay int // in milliseconds
+	*InMemoryAuthenticationHandler
+	getCredCallCount atomic.Int64
 }
 
-func (m *RemoteThrottleProvider) GetCredential(username string) (password string, found bool, err error) {
-	time.Sleep(time.Millisecond * time.Duration(m.delay))
-	return m.InMemoryProvider.GetCredential(username)
+func (m *RemoteThrottleProvider) GetCredential(username string) (credential Credential, found bool, err error) {
+	m.getCredCallCount.Add(1)
+	return m.InMemoryAuthenticationHandler.GetCredential(username)
 }
 
 type cacheTestSuite struct {
-	server       *Server
-	serverAddr   string
-	credProvider CredentialProvider
-	tlsPara      string
+	suite.Suite
+	server      *Server
+	serverAddr  string
+	authHandler AuthenticationHandler
+	tlsPara     string
 
 	db *sql.DB
 
 	l net.Listener
 }
 
-func (s *cacheTestSuite) SetUpSuite(c *C) {
+func (s *cacheTestSuite) SetupSuite() {
 	s.serverAddr = fmt.Sprintf("%s:%s", *test_util.MysqlFakeHost, *test_util.MysqlFakePort)
 
 	var err error
 
 	s.l, err = net.Listen("tcp", s.serverAddr)
-	c.Assert(err, IsNil)
+	require.NoError(s.T(), err)
 
-	go s.onAccept(c)
+	go s.onAccept()
 
 	time.Sleep(30 * time.Millisecond)
 }
 
-func (s *cacheTestSuite) TearDownSuite(c *C) {
+func (s *cacheTestSuite) TearDownSuite() {
 	if s.l != nil {
 		s.l.Close()
 	}
 }
 
-func (s *cacheTestSuite) onAccept(c *C) {
+func (s *cacheTestSuite) onAccept() {
 	for {
 		conn, err := s.l.Accept()
 		if err != nil {
 			return
 		}
 
-		go s.onConn(conn, c)
+		go s.onConn(conn)
 	}
 }
 
-func (s *cacheTestSuite) onConn(conn net.Conn, c *C) {
-	//co, err := NewConn(conn, *testUser, *testPassword, &testHandler{s})
-	co, err := NewCustomizedConn(conn, s.server, s.credProvider, &testCacheHandler{s})
-	c.Assert(err, IsNil)
+func (s *cacheTestSuite) onConn(conn net.Conn) {
+	// co, err := NewConn(conn, *testUser, *testPassword, &testHandler{s})
+	co, err := s.server.NewCustomizedConn(conn, s.authHandler, &testCacheHandler{s})
+	require.NoError(s.T(), err)
 	for {
 		err = co.HandleCommand()
 		if err != nil {
@@ -120,47 +117,38 @@ func (s *cacheTestSuite) onConn(conn net.Conn, c *C) {
 	}
 }
 
-func (s *cacheTestSuite) runSelect(c *C) {
+func (s *cacheTestSuite) runSelect() {
 	var a int64
 	var b string
 
 	err := s.db.QueryRow("SELECT a, b FROM tbl WHERE id=1").Scan(&a, &b)
-	c.Assert(err, IsNil)
-	c.Assert(a, Equals, int64(1))
-	c.Assert(b, Equals, "hello world")
+	require.NoError(s.T(), err)
+	require.Equal(s.T(), int64(1), a)
+	require.Equal(s.T(), "hello world", b)
 }
 
-func (s *cacheTestSuite) TestCache(c *C) {
+func (s *cacheTestSuite) TestCache() {
 	// first connection
-	t1 := time.Now()
 	var err error
 	s.db, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s?tls=%s", *testUser, *testPassword, s.serverAddr, *testDB, s.tlsPara))
-	c.Assert(err, IsNil)
+	require.NoError(s.T(), err)
 	s.db.SetMaxIdleConns(4)
-	s.runSelect(c)
-	t2 := time.Now()
-
-	d1 := int(t2.Sub(t1).Nanoseconds() / 1e6)
-	//log.Debugf("first connection took %d milliseconds", d1)
-
-	c.Assert(d1, GreaterEqual, delay)
+	s.runSelect()
+	got := s.authHandler.(*RemoteThrottleProvider).getCredCallCount.Load()
+	require.Equal(s.T(), int64(1), got)
 
 	if s.db != nil {
 		s.db.Close()
 	}
 
 	// second connection
-	t3 := time.Now()
 	s.db, err = sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s)/%s?tls=%s", *testUser, *testPassword, s.serverAddr, *testDB, s.tlsPara))
-	c.Assert(err, IsNil)
+	require.NoError(s.T(), err)
 	s.db.SetMaxIdleConns(4)
-	s.runSelect(c)
-	t4 := time.Now()
+	s.runSelect()
+	got = s.authHandler.(*RemoteThrottleProvider).getCredCallCount.Load()
+	require.Equal(s.T(), int64(2), got)
 
-	d2 := int(t4.Sub(t3).Nanoseconds() / 1e6)
-	//log.Debugf("second connection took %d milliseconds", d2)
-
-	c.Assert(d2, Less, delay)
 	if s.db != nil {
 		s.db.Close()
 	}
@@ -182,13 +170,13 @@ func (h *testCacheHandler) handleQuery(query string, binary bool) (*mysql.Result
 	case "select":
 		var r *mysql.Resultset
 		var err error
-		//for handle go mysql driver select @@max_allowed_packet
+		// for handle go mysql driver select @@max_allowed_packet
 		if strings.Contains(strings.ToLower(query), "max_allowed_packet") {
-			r, err = mysql.BuildSimpleResultset([]string{"@@max_allowed_packet"}, [][]interface{}{
+			r, err = mysql.BuildSimpleResultset([]string{"@@max_allowed_packet"}, [][]any{
 				{mysql.MaxPayloadLen},
 			}, binary)
 		} else {
-			r, err = mysql.BuildSimpleResultset([]string{"a", "b"}, [][]interface{}{
+			r, err = mysql.BuildSimpleResultset([]string{"a", "b"}, [][]any{
 				{1, "hello world"},
 			}, binary)
 		}
@@ -232,15 +220,16 @@ func (h *testCacheHandler) HandleQuery(query string) (*mysql.Result, error) {
 func (h *testCacheHandler) HandleFieldList(table string, fieldWildcard string) ([]*mysql.Field, error) {
 	return nil, nil
 }
-func (h *testCacheHandler) HandleStmtPrepare(sql string) (params int, columns int, ctx interface{}, err error) {
+
+func (h *testCacheHandler) HandleStmtPrepare(sql string) (params int, columns int, ctx any, err error) {
 	return 0, 0, nil, nil
 }
 
-func (h *testCacheHandler) HandleStmtClose(context interface{}) error {
+func (h *testCacheHandler) HandleStmtClose(context any) error {
 	return nil
 }
 
-func (h *testCacheHandler) HandleStmtExecute(ctx interface{}, query string, args []interface{}) (*mysql.Result, error) {
+func (h *testCacheHandler) HandleStmtExecute(ctx any, query string, args []any) (*mysql.Result, error) {
 	return h.handleQuery(query, true)
 }
 

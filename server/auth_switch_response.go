@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -9,8 +8,10 @@ import (
 	"crypto/tls"
 	"fmt"
 
+	"github.com/pingcap/tidb/pkg/parser/auth"
+
 	"github.com/pingcap/errors"
-	. "github.com/starainrt/go-mysql/mysql"
+	"github.com/starainrt/go-mysql/mysql"
 )
 
 func (c *Conn) handleAuthSwitchResponse() error {
@@ -19,52 +20,11 @@ func (c *Conn) handleAuthSwitchResponse() error {
 		return err
 	}
 
-	switch c.authPluginName {
-	case AUTH_NATIVE_PASSWORD:
-		if err := c.acquirePassword(); err != nil {
-			return err
-		}
-		return c.compareNativePasswordAuthData(authData, c.password)
-
-	case AUTH_CACHING_SHA2_PASSWORD:
-		if !c.cachingSha2FullAuth {
-			// Switched auth method but no MoreData packet send yet
-			if err := c.compareCacheSha2PasswordAuthData(authData); err != nil {
-				return err
-			} else {
-				if c.cachingSha2FullAuth {
-					return c.handleAuthSwitchResponse()
-				}
-				return nil
-			}
-		}
-		// AuthMoreData packet already sent, do full auth
-		if err := c.handleCachingSha2PasswordFullAuth(authData); err != nil {
-			return err
-		}
-		c.writeCachingSha2Cache()
-		return nil
-
-	case AUTH_SHA256_PASSWORD:
-		cont, err := c.handlePublicKeyRetrieval(authData)
-		if err != nil {
-			return err
-		}
-		if !cont {
-			return nil
-		}
-		if err := c.acquirePassword(); err != nil {
-			return err
-		}
-		return c.compareSha256PasswordAuthData(authData, c.password)
-
-	default:
-		return errors.Errorf("unknown authentication plugin name '%s'", c.authPluginName)
-	}
+	return c.compareAuthData(c.authPluginName, authData)
 }
 
 func (c *Conn) handleCachingSha2PasswordFullAuth(authData []byte) error {
-	if err := c.acquirePassword(); err != nil {
+	if err := c.acquireCredential(); err != nil {
 		return err
 	}
 	if tlsConn, ok := c.Conn.Conn.(*tls.Conn); ok {
@@ -76,10 +36,6 @@ func (c *Conn) handleCachingSha2PasswordFullAuth(authData []byte) error {
 		if l := len(authData); l != 0 && authData[l-1] == 0x00 {
 			authData = authData[:l-1]
 		}
-		if bytes.Equal(authData, []byte(c.password)) {
-			return nil
-		}
-		return errAccessDenied(c.password)
 	} else {
 		// client either request for the public key or send the encrypted password
 		if len(authData) == 1 && authData[0] == 0x02 {
@@ -95,36 +51,66 @@ func (c *Conn) handleCachingSha2PasswordFullAuth(authData []byte) error {
 		}
 		// the encrypted password
 		// decrypt
-		dbytes, err := rsa.DecryptOAEP(sha1.New(), rand.Reader, (c.serverConf.tlsConfig.Certificates[0].PrivateKey).(*rsa.PrivateKey), authData, nil)
+		if c.serverConf.rsaPrivateKey == nil {
+			return errors.New("RSA key not configured; non-TLS connections are not supported for this authentication method")
+		}
+		dbytes, err := rsa.DecryptOAEP(sha1.New(), rand.Reader, c.serverConf.rsaPrivateKey, authData, nil)
 		if err != nil {
 			return err
 		}
-		plain := make([]byte, len(c.password)+1)
-		copy(plain, c.password)
-		for i := range plain {
-			j := i % len(c.salt)
-			plain[i] ^= c.salt[j]
+		authData = mysql.Xor(dbytes, c.salt)
+		if l := len(authData); l != 0 && authData[l-1] == 0x00 {
+			authData = authData[:l-1]
 		}
-		if bytes.Equal(plain, dbytes) {
-			return nil
-		}
-		return errAccessDenied(c.password)
 	}
+	err := c.checkSha2CacheCredentials(authData, c.credential)
+	if err != nil {
+		return err
+	}
+	// write cache on successful auth - needs to be here as we have the decrypted password
+	// and we need to store an unsalted hashed version of the plaintext password in the cache
+	c.writeCachingSha2Cache(authData)
+	return nil
 }
 
-func (c *Conn) writeCachingSha2Cache() {
+func (c *Conn) checkSha2CacheCredentials(clientAuthData []byte, credential Credential) error {
+	if isEmptyPassword(clientAuthData) {
+		if credential.hasEmptyPassword() {
+			return nil
+		}
+		return ErrAccessDeniedNoPassword
+	}
+
+	for _, password := range credential.Passwords {
+		hash, err := credential.hashPassword(password)
+		if err != nil {
+			continue
+		}
+		match, err := auth.CheckHashingPassword([]byte(hash), string(clientAuthData), mysql.AUTH_CACHING_SHA2_PASSWORD)
+		if match && err == nil {
+			return nil
+		}
+	}
+	return ErrAccessDenied
+}
+
+func (c *Conn) writeCachingSha2Cache(authData []byte) {
 	// write cache
-	if c.password == "" {
+	if authData == nil {
 		return
+	}
+
+	if l := len(authData); l != 0 && authData[l-1] == 0x00 {
+		authData = authData[:l-1]
 	}
 	// SHA256(PASSWORD)
 	crypt := sha256.New()
-	crypt.Write([]byte(c.password))
+	crypt.Write(authData)
 	m1 := crypt.Sum(nil)
 	// SHA256(SHA256(PASSWORD))
 	crypt.Reset()
 	crypt.Write(m1)
 	m2 := crypt.Sum(nil)
 	// caching_sha2_password will maintain an in-memory hash of `user`@`host` => SHA256(SHA256(PASSWORD))
-	c.serverConf.cacheShaPassword.Store(fmt.Sprintf("%s@%s", c.user, c.Conn.LocalAddr()), m2)
+	c.serverConf.cacheShaPassword.Store(fmt.Sprintf("%s@%s", c.user, c.LocalAddr()), m2)
 }

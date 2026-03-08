@@ -2,16 +2,11 @@ package dump
 
 import (
 	"flag"
-	"testing"
 
 	"github.com/starainrt/go-mysql/mysql"
 )
 
 var execution = flag.String("exec", "mysqldump", "mysqldump execution path")
-
-func Test(t *testing.T) {
-	TestingT(t)
-}
 
 type testParseHandler struct {
 	gset mysql.GTIDSet
